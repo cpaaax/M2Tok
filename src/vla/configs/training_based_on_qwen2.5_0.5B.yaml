@@ -1,0 +1,66 @@
+wandb:
+  resume: False
+  run_id: 'M2Tok_VLA'
+  api_key: 'your key'
+
+experiment:
+    project: "M2Tok_VLA"
+    name: "v1"
+    output_dir: "./vla_saved_ckpt"
+    save_every: 5000
+    log_every: 50
+    log_grad_norm_every: 500
+    resume_from_checkpoint: False
+
+model:
+    img_encoder: "/path/to/siglip-so400m-patch14-224"
+    vla_model:
+        vlm_model_path: '/path/to/Qwen2.5-0.5B'
+        hidden_size: 896  # hidden size of vlm_model
+
+    action_vae:
+         model_path: '/path/to/trained_vqvae_ckpt'
+    gradient_checkpointing: True
+
+dataset:
+    data_root_dir: "/path/to/RoboTwin_piper_12_tasks_data/trajectories"
+    instruction_path: "/path/to/RoboTwin_piper_12_tasks_data/instructions"
+    data_mix: "robotwin"
+    image_aug: False
+    img_history_size: 1
+    action_chunk_size: 8
+    action_vocab_size: 2048
+    state_max: 3.0
+    state_min: -3
+
+    image_size: 224
+    state_vocab_size: 512
+    combined_loader_mode: "min_size"
+
+
+optimizer:
+    name: adamw
+    params: # default adamw params
+        learning_rate: 0.0001
+        scale_lr: False # scale learning rate by total batch size
+        beta1: 0.9
+        beta2: 0.999
+        weight_decay: 0.01
+        epsilon: 1e-8
+
+lr_scheduler:
+    scheduler: "cosine"
+    params:
+        learning_rate: ${optimizer.params.learning_rate}
+        warmup_ratio: 0.03
+
+training:
+    gradient_accumulation_steps: 1
+    per_device_batch_size: 120
+    mixed_precision: "bf16"
+    enable_tf32: True
+    seed: 10086
+    num_train_epochs: 10
+    max_grad_norm: 1.0
+    target_length: 40
+    parallel_decoding: false  # False: autoregressive decoding, Ture: parallel decoding
