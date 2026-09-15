@@ -233,18 +233,14 @@ def train():
     # action tokenizer
     action_vqvae_model = ActionVQVAE(
         input_emb_width=7,
-        quantizer='multicodebook',
-        codebook_size=2048,
-        codebook_dim=2048,
-        n_latent_dims=512,
+        codebook_size=config.training.codebook_size,
+        codebook_dim=config.training.codebook_dim,
+        n_latent_dims=config.training.n_latent_dims,
         down_t=2,
         stride_t=2,
         depth=3,
         dilation_growth_rate=3,
-        norm=None,
-        activation= "relu",
-        num_codebooks = 8,
-        quant_proj='attn',
+        num_codebooks = config.training.num_codebooks,
     )
 
     action_vqvae_model.load_state_dict(torch.load(config.model.action_vae.model_path, weights_only=False))
@@ -257,19 +253,17 @@ def train():
         attn_implementation="flash_attention_2" #"eager", # "flash_attention_2"
     )
     vlm.resize_token_embeddings(len(tokenizer))
-    vla = Showo(vlm)
+    vla = VLA_Model(vlm)
     model = UnitModel(
         vla,
-        # codebook dim是2048，分成了8块，所以是2048/8=256
-        ActionProjector(input_dim=256, output_dim=config.model.vla_model.hidden_size),  # here the input dim is codebook_dim/num_codebooks
-        # siglip encoder得到的image feature dim是1152
+
+        ActionProjector(input_dim=config.training.codebook_size//config.training.num_codebooks, output_dim=config.model.vla_model.hidden_size),
+        # The image feature dimension output by the SigLIP encoder is 1152
         ImageProjector(input_dim=1152, output_dim=config.model.vla_model.hidden_size),
     )
 
     model.to(accelerator.device, dtype=torch.bfloat16)
     model.requires_grad_(True)
-
-
 
     os.makedirs(run_dir := (Path("runs") / config.wandb.run_id), exist_ok=True)
     os.makedirs(Path("runs") / config.wandb.run_id / "checkpoints", exist_ok=True)
@@ -416,7 +410,6 @@ def train():
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
         for batch, batch_idx, dataloader_idx in tqdm(combined_dataloader, total=num_update_steps_per_epoch):
-            # 在这里处理数据
             batch = batch["vla_flow"]
 
             (
@@ -438,7 +431,7 @@ def train():
             pixel_values_steps = pixel_values_steps.reshape(batch_size * img_input_len, *(pixel_values_steps.size()[2:])).to(
                 model.device, non_blocking=True).to(dtype=torch.bfloat16)  # [batch, img_history_size, 3, 224,224] -> [batch*img_history_size,3, 224,224]
 
-            # 我们要得到每个input text的长度
+            # get the length for each input text
             input_text_lengths = input_text_ids.ne(tokenizer.pad_token_id)
             input_text_lengths = torch.sum(input_text_lengths, dim=1)
 
@@ -455,7 +448,7 @@ def train():
             left_arm_state_end = torch.ones((batch_size, 1)).long() * tokenizer.left_arm_eost_token_id
             right_arm_state_start = torch.ones((batch_size, 1)).long() * tokenizer.right_arm_sost_token_id
             right_arm_state_end = torch.ones((batch_size, 1)).long() * tokenizer.right_arm_eost_token_id
-            # 增加state分隔符
+            # Process state
             state_ids = torch.cat(
                 [
                     left_arm_state_start,
@@ -469,16 +462,16 @@ def train():
             state_ids = state_ids.to(model.device, non_blocking=True)
             with torch.no_grad():
 
-                # 处理actions
+                # process actions
                 action_steps_values = action_steps_values.reshape(batch_size * step_num, *(action_steps_values.size()[2:])).to(
                 model.device, non_blocking=True).to(dtype=torch.bfloat16) # [batch, img_history_size, chunk_size, 14]-># [batch*img_history_size, chunk_size, 14]
 
-                # 这里需要把left action和right action分开处理，因为我们的action vae需要左右分开的输入
+                # process the left and right actions separately here, as our M2Tok requires separate inputs for the left and right sides
                 left_actions = action_steps_values[:,:,:7]
                 right_actions = action_steps_values[:,:,7:]
 
-                left_action_ids, left_action_features = action_vqvae_model.action_to_idx(left_actions)  # left_action_ids: [batch*img_history_size, chunk_size/4, 8], left_action_features: [batch*img_history_size, chunk_size/4, 8, 256]
-                right_action_ids, right_action_features = action_vqvae_model.action_to_idx(right_actions)  # right_action_ids: [batch*img_history_size, chunk_size/4, 8], right_action_features: [batch*img_history_size, chunk_size/4, 8, 256]
+                left_action_ids, left_action_features = action_vqvae_model.action_to_idx(left_actions)  # left_action_ids: [batch*img_history_size, chunk_size/(2^down_t=4), 8], left_action_features: [batch*img_history_size, chunk_size/4, 8, 256]
+                right_action_ids, right_action_features = action_vqvae_model.action_to_idx(right_actions)  # right_action_ids: [batch*img_history_size, chunk_size/(2^down_t), 8], right_action_features: [batch*img_history_size, chunk_size/4, 8, 256]
                 img_embeddings = img_encoder(pixel_values_steps, output_hidden_states=True).hidden_states[-2]
 
                 left_action_features = left_action_features.contiguous().view(batch_size, step_num, *(left_action_features.size()[-3:]))  # [batch*img_history_size, chunk_size/4, 8, 256]->[batch,img_history_size, chunk_size/4, 8, 256]
@@ -493,14 +486,12 @@ def train():
             text_embeddings = model.vla.model.model.embed_tokens(input_text_ids)  # [batch, len, 896]
             img_embeddings = img_embeddings.contiguous().view(
                 batch_size, img_input_len, -1,
-                text_embeddings.shape[-1])  # [batch*img_input_len, 256, 896]->[batch, img_input_len, 256, 896], 这里img_input_len=1
+                text_embeddings.shape[-1])  # [batch*img_input_len, 256, 896]->[batch, img_input_len, 256, 896], here img_input_len=1
 
             left_act_embeddings = model.action_projector(left_action_features.to(dtype=torch.bfloat16))  # [batch, step_num, chunk_size/4, 8, 896]
             right_act_embeddings = model.action_projector(right_action_features.to(dtype=torch.bfloat16))  # [batch, step_num, chunk_size/4, 8, 896]
 
 
-            # act_embeddings = model.action_projector(action_features.to(dtype=torch.bfloat16))  # [batch, img_input_len-1, 4*16, 896]
-            # state_embeddings = vlwa.showo.model.model.embed_tokens(state_ids) # [batch, len, 896]
             state_embeddings = model.vla.model.model.embed_tokens(state_ids) # [batch, 14, 896]
 
             observation_img_embeddings = img_embeddings[:, 0]  # [batch, 256, 896]
@@ -535,7 +526,7 @@ def train():
 
 
             if config.training.parallel_decoding:
-                # 如果是parallel decoding, 参考openvla-oft, 将action embedding全部置为0
+                # If using parallel decoding, set all action embeddings to 0 (following openvla-oft)
                 left_act_embeddings = left_act_embeddings*0
                 right_act_embeddings = right_act_embeddings*0
 
@@ -577,7 +568,7 @@ def train():
 
             attention_mask = torch.ones(*(input_embeddings.size()[:2])).to(model.device)
             for b in range(batch_size):
-                pad_start = input_text_lengths[b]+2# 2是指前缀的instance_start和text_start
+                pad_start = input_text_lengths[b]+2  # 2是指前缀的instance_start和text_start
                 pad_end = pad_start + input_text_ids.size(-1) - input_text_lengths[b]
                 attention_mask[b, pad_start:pad_end] = 0
 

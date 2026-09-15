@@ -60,7 +60,6 @@ def main(rank, cfg, world_size):
         depth=3,
         dilation_growth_rate=3,
         num_codebooks=cfg.vqvae_model.num_codebooks,
-        quant_proj=cfg.vqvae_model.quant_proj,
     )
     vqvae_model.to(rank).train()
 

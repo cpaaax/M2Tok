@@ -63,4 +63,8 @@ training:
     num_train_epochs: 10
     max_grad_norm: 1.0
     target_length: 40
+    codebook_dim: 2048
+    codebook_size: 2048
+    n_latent_dims: 512
+    num_codebooks: 8
     parallel_decoding: false  # False: autoregressive decoding, Ture: parallel decoding
