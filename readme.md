@@ -73,4 +73,3 @@ accelerate launch \
   --main_process_port=8980 \
   vla-scripts/train_mine.py config=configs/training_based_on_qwen2.5_0.5B.yaml
 ```
-```
